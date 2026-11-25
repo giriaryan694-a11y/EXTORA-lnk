@@ -24,7 +24,7 @@ def _build_lnk(target: str, arguments: str = "", icon_env: str = "") -> bytes:
         if arguments:
             kwargs["arguments"] = arguments
         if icon_env:
-            kwargs["icon_env"] = icon_env
+            kwargs["icon_env"] = icon_env   # requires lnksmith >= 1.0.3
         return build_lnk(**kwargs)
 
     if _HAS_PYLNK3:
@@ -41,7 +41,6 @@ def _build_lnk(target: str, arguments: str = "", icon_env: str = "") -> bytes:
     raise RuntimeError("No LNK library available (install lnksmith or pylnk3)")
 
 
-# Characters illegal in Windows filenames + path separators
 _ILLEGAL_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL",
@@ -51,23 +50,13 @@ _RESERVED_NAMES = {
 
 
 def _sanitize_zip_name(raw: str, fallback: str) -> str:
-    """Return a safe ZIP base name (no extension). Strips extension markers,
-    path separators, illegal characters, and reserved device names."""
-    name = (raw or "").strip()
-    if not name:
-        name = fallback
-    # Strip recognized extensions so we control the final one
+    name = (raw or "").strip() or fallback
     name = re.sub(r"\.(zip|lnk|download)$", "", name, flags=re.IGNORECASE)
-    # Remove path separators and illegal chars
-    name = _ILLEGAL_FILENAME.sub("", name)
-    # Remove leading/trailing dots and spaces (Windows rule)
-    name = name.strip(" .")
+    name = _ILLEGAL_FILENAME.sub("", name).strip(" .")
     if not name:
         name = fallback
-    # Reserved device names
     if name.upper() in _RESERVED_NAMES:
         name = "_" + name
-    # Cap length (Windows MAX_PATH headroom); leave room for ".zip"
     if len(name) > 200:
         name = name[:200]
     return name
@@ -87,7 +76,6 @@ def generate():
 
     display = re.sub(r"\.(download|lnk|zip)$", "", display, flags=re.IGNORECASE)
     display = _ILLEGAL_FILENAME.sub("", display).strip(" .") or "video.mp4"
-
     lnk_filename = display + ".lnk"
 
     zip_base = _sanitize_zip_name(zip_name_raw, display)
@@ -104,7 +92,7 @@ def generate():
         if ext not in (".ico", ".png", ".exe", ".dll"):
             ext = ".ico"
         icon_zip_name = "icon" + ext
-        icon_env = icon_zip_name
+        icon_env = icon_zip_name          # bare filename, resolved relative to .lnk
         icon_source = "upload"
     elif icon_path_raw:
         icon_env = icon_path_raw
@@ -138,9 +126,14 @@ def generate():
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"ok": True, "lnksmith": _HAS_LNKSMITH, "pylnk3": _HAS_PYLNK3})
+    return jsonify({
+        "ok": True,
+        "lnksmith": _HAS_LNKSMITH,
+        "pylnk3": _HAS_PYLNK3,
+    })
 
 
+# ---------- FRONTEND (unchanged) ----------
 _HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -242,7 +235,7 @@ _HTML = r"""<!DOCTYPE html>
   <input type="text" id="displayName" value="video.mp4" spellcheck="false">
 
   <label for="zipName">Output ZIP filename (without .zip)</label>
-  <input type="text" id="zipName" value="video" spellcheck="false">
+  <input type="text" id="zipName" value="video.mp4" spellcheck="false">
   <div class="hint">Leave empty to reuse display name. Illegal characters stripped server-side.</div>
 
   <label for="iconFile">Upload icon (.ico, .png, .exe, .dll)</label>
@@ -293,7 +286,6 @@ function escapeHtml(s) {
   return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-// Mirror display name into ZIP name until the user edits ZIP name manually
 let zipManuallyEdited = false;
 zipNameEl.addEventListener('input', () => { zipManuallyEdited = true; });
 displayEl.addEventListener('input', () => {
@@ -334,8 +326,8 @@ document.getElementById('generateBtn').addEventListener('click', async () => {
       throw new Error(err.error || 'request failed');
     }
 
-    // Prefer the server-confirmed ZIP name (sanitized) via response header
-    const serverZipName = res.headers.get('X-Zip-Name') || (form.get('zip_name') || form.get('display')).replace(/\.(zip|lnk|download)$/i, '') + '.zip';
+    const serverZipName = res.headers.get('X-Zip-Name') ||
+      (form.get('zip_name') || form.get('display')).replace(/\.(zip|lnk|download)$/i, '') + '.zip';
 
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
