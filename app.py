@@ -1,30 +1,58 @@
 import io
 import re
 import os
+import inspect
 import zipfile
 from flask import Flask, request, Response, jsonify
 
 app = Flask(__name__)
 
+# ---------- LNK BACKEND ----------
 try:
     from lnksmith import build_lnk
     _HAS_LNKSMITH = True
+    # Introspect accepted kwargs once at import time
+    try:
+        _LNKSMITH_PARAMS = set(inspect.signature(build_lnk).parameters.keys())
+    except (ValueError, TypeError):
+        _LNKSMITH_PARAMS = set()
 except ImportError:
     _HAS_LNKSMITH = False
-    try:
-        from pylnk3 import Lnk
-        _HAS_PYLNK3 = True
-    except ImportError:
-        _HAS_PYLNK3 = False
+    _LNKSMITH_PARAMS = set()
+
+try:
+    from pylnk3 import Lnk
+    _HAS_PYLNK3 = True
+except ImportError:
+    _HAS_PYLNK3 = False
 
 
-def _build_lnk(target: str, arguments: str = "", icon_env: str = "") -> bytes:
+def _build_lnk(target: str, arguments: str = "", icon_hint: str = "") -> bytes:
+    """
+    Build a .lnk file. icon_hint is either an uploaded filename (e.g. "icon.ico")
+    or an absolute path (e.g. "C:\\Windows\\System32\\shell32.dll").
+    Uses lnksmith if available, otherwise pylnk3.
+    Adapts to the installed lnksmith version: passes icon_env only if supported.
+    """
     if _HAS_LNKSMITH:
-        kwargs = {"target": target, "show_command": 1}
-        if arguments:
+        kwargs = {"target": target}
+
+        # show_command is present in all recent versions; guard just in case
+        if "show_command" in _LNKSMITH_PARAMS:
+            kwargs["show_command"] = 1  # SW_SHOWNORMAL
+
+        if arguments and "arguments" in _LNKSMITH_PARAMS:
             kwargs["arguments"] = arguments
-        if icon_env:
-            kwargs["icon_env"] = icon_env   # requires lnksmith >= 1.0.3
+
+        if icon_hint:
+            if "icon_env" in _LNKSMITH_PARAMS:
+                # Preferred: environment-variable expansion block
+                kwargs["icon_env"] = icon_hint
+            elif "icon" in _LNKSMITH_PARAMS:
+                # Fallback: literal path. Bare filename may resolve relative
+                # to the .lnk's folder on most Windows builds.
+                kwargs["icon"] = icon_hint
+
         return build_lnk(**kwargs)
 
     if _HAS_PYLNK3:
@@ -32,8 +60,8 @@ def _build_lnk(target: str, arguments: str = "", icon_env: str = "") -> bytes:
         lnk.path = target
         if arguments:
             lnk.arguments = arguments
-        if icon_env:
-            lnk.icon = icon_env
+        if icon_hint:
+            lnk.icon = icon_hint
         buf = io.BytesIO()
         lnk.save(buf)
         return buf.getvalue()
@@ -81,7 +109,7 @@ def generate():
     zip_base = _sanitize_zip_name(zip_name_raw, display)
     zip_filename = zip_base + ".zip"
 
-    icon_env = ""
+    icon_hint = ""
     icon_bytes = None
     icon_zip_name = None
     icon_source = "none"
@@ -92,14 +120,15 @@ def generate():
         if ext not in (".ico", ".png", ".exe", ".dll"):
             ext = ".ico"
         icon_zip_name = "icon" + ext
-        icon_env = icon_zip_name          # bare filename, resolved relative to .lnk
+        # Bare filename: Windows may resolve it relative to the .lnk location.
+        icon_hint = icon_zip_name
         icon_source = "upload"
     elif icon_path_raw:
-        icon_env = icon_path_raw
+        icon_hint = icon_path_raw
         icon_source = "path"
 
     try:
-        lnk_bytes = _build_lnk(target, args, icon_env)
+        lnk_bytes = _build_lnk(target, args, icon_hint)
     except Exception as e:
         return jsonify({"error": "lnk build failed: " + str(e)}), 500
 
@@ -120,6 +149,7 @@ def generate():
             "X-Content-Type-Options": "nosniff",
             "X-Icon-Source": icon_source,
             "X-Zip-Name": zip_filename,
+            "X-LNKsmith-Params": ",".join(sorted(_LNKSMITH_PARAMS)) if _HAS_LNKSMITH else "",
         },
     )
 
@@ -130,10 +160,21 @@ def health():
         "ok": True,
         "lnksmith": _HAS_LNKSMITH,
         "pylnk3": _HAS_PYLNK3,
+        "lnksmith_params": sorted(_LNKSMITH_PARAMS) if _HAS_LNKSMITH else [],
     })
 
 
-# ---------- FRONTEND (unchanged) ----------
+@app.route("/api/version", methods=["GET"])
+def version():
+    import importlib.metadata as md
+    try:
+        ver = md.version("lnksmith")
+    except md.PackageNotFoundError:
+        ver = "not installed"
+    return jsonify({"lnksmith_version": ver})
+
+
+# ---------- FRONTEND ----------
 _HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -235,7 +276,7 @@ _HTML = r"""<!DOCTYPE html>
   <input type="text" id="displayName" value="video.mp4" spellcheck="false">
 
   <label for="zipName">Output ZIP filename (without .zip)</label>
-  <input type="text" id="zipName" value="video.mp4" spellcheck="false">
+  <input type="text" id="zipName" value="video" spellcheck="false">
   <div class="hint">Leave empty to reuse display name. Illegal characters stripped server-side.</div>
 
   <label for="iconFile">Upload icon (.ico, .png, .exe, .dll)</label>
