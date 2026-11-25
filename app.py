@@ -11,7 +11,6 @@ app = Flask(__name__)
 try:
     from lnksmith import build_lnk
     _HAS_LNKSMITH = True
-    # Introspect accepted kwargs once at import time
     try:
         _LNKSMITH_PARAMS = set(inspect.signature(build_lnk).parameters.keys())
     except (ValueError, TypeError):
@@ -27,31 +26,29 @@ except ImportError:
     _HAS_PYLNK3 = False
 
 
-def _build_lnk(target: str, arguments: str = "", icon_hint: str = "") -> bytes:
+def _build_lnk(target: str, arguments: str = "", icon_path: str = "", icon_index: int = 0) -> bytes:
     """
-    Build a .lnk file. icon_hint is either an uploaded filename (e.g. "icon.ico")
-    or an absolute path (e.g. "C:\\Windows\\System32\\shell32.dll").
-    Uses lnksmith if available, otherwise pylnk3.
-    Adapts to the installed lnksmith version: passes icon_env only if supported.
+    Build a .lnk file. icon_path must be an absolute path or contain
+    environment variables (e.g. "%SystemRoot%\\System32\\imageres.dll").
+    icon_index is the resource index (negative for resource IDs).
     """
     if _HAS_LNKSMITH:
         kwargs = {"target": target}
 
-        # show_command is present in all recent versions; guard just in case
         if "show_command" in _LNKSMITH_PARAMS:
             kwargs["show_command"] = 1  # SW_SHOWNORMAL
 
         if arguments and "arguments" in _LNKSMITH_PARAMS:
             kwargs["arguments"] = arguments
 
-        if icon_hint:
+        if icon_path:
             if "icon_env" in _LNKSMITH_PARAMS:
-                # Preferred: environment-variable expansion block
-                kwargs["icon_env"] = icon_hint
+                kwargs["icon_env"] = icon_path
+                if "icon_index" in _LNKSMITH_PARAMS:
+                    kwargs["icon_index"] = icon_index
             elif "icon" in _LNKSMITH_PARAMS:
-                # Fallback: literal path. Bare filename may resolve relative
-                # to the .lnk's folder on most Windows builds.
-                kwargs["icon"] = icon_hint
+                # Fallback for older lnksmith versions that combine path and index
+                kwargs["icon"] = f"{icon_path},{icon_index}"
 
         return build_lnk(**kwargs)
 
@@ -60,8 +57,8 @@ def _build_lnk(target: str, arguments: str = "", icon_hint: str = "") -> bytes:
         lnk.path = target
         if arguments:
             lnk.arguments = arguments
-        if icon_hint:
-            lnk.icon = icon_hint
+        if icon_path:
+            lnk.icon = f"{icon_path},{icon_index}"
         buf = io.BytesIO()
         lnk.save(buf)
         return buf.getvalue()
@@ -90,14 +87,24 @@ def _sanitize_zip_name(raw: str, fallback: str) -> str:
     return name
 
 
+# Built-in portable icons: (path, index). Paths contain %env% vars.
+# Resource IDs (negative numbers) are stable across Windows 10/11.
+ICON_MAP = {
+    "video":    ("%SystemRoot%\\System32\\imageres.dll", -189),  # Videos folder
+    "audio":    ("%SystemRoot%\\System32\\imageres.dll", -108),  # Music folder
+    "image":    ("%SystemRoot%\\System32\\imageres.dll", -113),  # Pictures folder
+    "document": ("%SystemRoot%\\System32\\imageres.dll", -112),  # Documents folder
+    "none":     ("", 0),
+}
+
+
 @app.route("/api/generate", methods=["POST"])
 def generate():
     target = (request.form.get("target") or "").strip()
     args = (request.form.get("args") or "").strip()
     display = (request.form.get("display") or "video.mp4").strip()
-    icon_path_raw = (request.form.get("icon") or "").strip()
+    icon_style = (request.form.get("icon_style") or "video").strip().lower()
     zip_name_raw = (request.form.get("zip_name") or "").strip()
-    icon_file = request.files.get("icon_file")
 
     if not target:
         return jsonify({"error": "target required"}), 400
@@ -109,34 +116,16 @@ def generate():
     zip_base = _sanitize_zip_name(zip_name_raw, display)
     zip_filename = zip_base + ".zip"
 
-    icon_hint = ""
-    icon_bytes = None
-    icon_zip_name = None
-    icon_source = "none"
-
-    if icon_file and icon_file.filename:
-        icon_bytes = icon_file.read()
-        ext = os.path.splitext(icon_file.filename)[1].lower()
-        if ext not in (".ico", ".png", ".exe", ".dll"):
-            ext = ".ico"
-        icon_zip_name = "icon" + ext
-        # Bare filename: Windows may resolve it relative to the .lnk location.
-        icon_hint = icon_zip_name
-        icon_source = "upload"
-    elif icon_path_raw:
-        icon_hint = icon_path_raw
-        icon_source = "path"
+    icon_path, icon_index = ICON_MAP.get(icon_style, ("", 0))
 
     try:
-        lnk_bytes = _build_lnk(target, args, icon_hint)
+        lnk_bytes = _build_lnk(target, args, icon_path, icon_index)
     except Exception as e:
         return jsonify({"error": "lnk build failed: " + str(e)}), 500
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(lnk_filename, lnk_bytes)
-        if icon_bytes is not None:
-            zf.writestr(icon_zip_name, icon_bytes)
     zip_bytes = buf.getvalue()
 
     return Response(
@@ -147,9 +136,7 @@ def generate():
             "Content-Length": str(len(zip_bytes)),
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
-            "X-Icon-Source": icon_source,
             "X-Zip-Name": zip_filename,
-            "X-LNKsmith-Params": ",".join(sorted(_LNKSMITH_PARAMS)) if _HAS_LNKSMITH else "",
         },
     )
 
@@ -215,22 +202,16 @@ _HTML = r"""<!DOCTYPE html>
     display: block; margin: 1.1rem 0 0.4rem; font-size: 0.72rem;
     text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted);
   }
-  input[type="text"], input[type="file"] {
+  input[type="text"], select {
     width: 100%; padding: 0.6rem 0.75rem; background: var(--surface-2);
     border: 1px solid var(--border); border-radius: 8px; color: var(--text);
     font-family: inherit; font-size: 0.85rem; transition: border-color 0.15s;
   }
-  input[type="text"]:focus {
+  input[type="text"]:focus, select:focus {
     outline: none; border-color: var(--accent);
     box-shadow: 0 0 0 3px rgba(124,92,255,0.15);
   }
-  input[type="file"] { padding: 0.5rem; font-size: 0.78rem; cursor: pointer; }
-  input[type="file"]::file-selector-button {
-    background: var(--border); color: var(--text); border: none;
-    padding: 0.35rem 0.75rem; border-radius: 6px;
-    font-family: inherit; font-size: 0.78rem; cursor: pointer; margin-right: 0.75rem;
-  }
-  input[type="file"]::file-selector-button:hover { background: var(--accent); color: #fff; }
+  select { cursor: pointer; }
   button {
     margin-top: 1.75rem; width: 100%; padding: 0.85rem 1.5rem;
     font-size: 0.85rem; font-family: inherit; letter-spacing: 0.08em;
@@ -245,13 +226,6 @@ _HTML = r"""<!DOCTYPE html>
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   #status { margin-top: 1rem; font-size: 0.75rem; color: var(--accent-2); white-space: pre-wrap; min-height: 1.2em; }
   #status.error { color: var(--danger); }
-  #infoBox {
-    margin-top: 1rem; padding: 0.9rem 1rem;
-    background: rgba(0,224,176,0.06); border: 1px solid rgba(0,224,176,0.25);
-    border-radius: 8px; font-size: 0.72rem; color: var(--accent-2); line-height: 1.6;
-  }
-  #infoBox:empty { display: none; }
-  #infoBox code { background: rgba(0,224,176,0.1); color: var(--accent-2); padding: 0.1rem 0.35rem; border-radius: 4px; }
   .hint { font-size: 0.65rem; color: var(--muted); margin-top: 0.25rem; }
   .credit {
     margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border);
@@ -279,62 +253,31 @@ _HTML = r"""<!DOCTYPE html>
   <input type="text" id="zipName" value="video" spellcheck="false">
   <div class="hint">Leave empty to reuse display name. Illegal characters stripped server-side.</div>
 
-  <label for="iconFile">Upload icon (.ico, .png, .exe, .dll)</label>
-  <input type="file" id="iconFile" accept=".ico,.png,.exe,.dll">
-
-  <label for="iconPath">Or: absolute icon path on target machine</label>
-  <input type="text" id="iconPath" value="" placeholder="C:\Windows\System32\shell32.dll" spellcheck="false">
+  <label for="iconStyle">Icon style (built-in, portable)</label>
+  <select id="iconStyle">
+    <option value="video" selected>Video file</option>
+    <option value="audio">Audio file</option>
+    <option value="image">Image file</option>
+    <option value="document">Document</option>
+    <option value="none">No icon (default target icon)</option>
+  </select>
+  <div class="hint">Icons are sourced from <code>%SystemRoot%\System32\imageres.dll</code> and exist on all Windows installations.</div>
 
   <button id="generateBtn">Generate ZIP</button>
   <div id="status"></div>
-  <div id="infoBox"></div>
 
   <div class="credit">Made By <span>Aryan Giri</span> | giriaryan694-a11y</div>
 </div>
 
 <script>
-const iconFileEl = document.getElementById('iconFile');
-const iconPathEl = document.getElementById('iconPath');
 const displayEl = document.getElementById('displayName');
 const zipNameEl = document.getElementById('zipName');
-const infoBox = document.getElementById('infoBox');
-
-function updateInfoBox() {
-  const hasFile = iconFileEl.files && iconFileEl.files.length > 0;
-  const hasPath = iconPathEl.value.trim().length > 0;
-
-  if (hasFile && hasPath) {
-    infoBox.innerHTML = '✓ Icon upload takes precedence over the absolute path.';
-    return;
-  }
-  if (hasFile) {
-    infoBox.innerHTML =
-      '✓ Uploaded icon will be embedded in the ZIP next to the <code>.lnk</code>.<br>' +
-      'Extract both files to the same folder before double-clicking.<br>' +
-      'If the icon does not render, right-click the <code>.lnk</code> → Properties → Change Icon → browse to the extracted icon.';
-    return;
-  }
-  if (hasPath) {
-    infoBox.innerHTML =
-      '✓ Using absolute icon path: <code>' + escapeHtml(iconPathEl.value.trim()) + '</code><br>' +
-      'Resolves only if that file exists on the target machine.';
-    return;
-  }
-  infoBox.innerHTML = '';
-}
-
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
 
 let zipManuallyEdited = false;
 zipNameEl.addEventListener('input', () => { zipManuallyEdited = true; });
 displayEl.addEventListener('input', () => {
   if (!zipManuallyEdited) zipNameEl.value = displayEl.value;
 });
-
-iconFileEl.addEventListener('change', updateInfoBox);
-iconPathEl.addEventListener('input', updateInfoBox);
 
 document.getElementById('generateBtn').addEventListener('click', async () => {
   const status = document.getElementById('status');
@@ -349,10 +292,7 @@ document.getElementById('generateBtn').addEventListener('click', async () => {
     form.append('args', document.getElementById('args').value.trim());
     form.append('display', displayEl.value.trim() || 'video.mp4');
     form.append('zip_name', zipNameEl.value.trim());
-    form.append('icon', iconPathEl.value.trim());
-
-    const file = iconFileEl.files[0];
-    if (file) form.append('icon_file', file);
+    form.append('icon_style', document.getElementById('iconStyle').value);
 
     if (!form.get('target')) {
       status.className = 'error';
