@@ -117,7 +117,7 @@ _HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Extora</title>
+<title>Extora-lnk</title>
 <style>
   :root {
     --bg: #0a0a0f; --surface: #12121a; --surface-2: #1a1a26;
@@ -202,7 +202,7 @@ _HTML = r"""<!DOCTYPE html>
 </head>
 <body>
 <div class="card">
-  <h1>EXTORA</h1>
+  <h1>EXTORA-lnk</h1>
   <p class="sub">server-side double-extension <code>.lnk</code> generator (ZIP delivery)</p>
 
   <label for="targetPath">Target absolute path</label>
