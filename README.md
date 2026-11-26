@@ -10,7 +10,7 @@ The `.lnk` binary is built server-side by `lnksmith` per `[MS-SHLLINK]`. ZIP del
 
 ## Icon Support / Limitations
 
-**Custom icons are intentionally not supported.** We attempted to implement this feature but hit a hard architectural limit of the Windows Shell Link format:
+**Custom icons are intentionally not supported.** I attempted to implement this feature but hit a hard architectural limit of the Windows Shell Link format:
 
 1. A `.lnk` file **does not embed** icon image bytes. It only stores a string path pointing to the icon file.
 2. Relative paths (like `%cd%\icon.ico` or `.\icon.ico`) do not reliably resolve to the shortcut's directory in Windows.
