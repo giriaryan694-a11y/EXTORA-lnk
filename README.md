@@ -4,11 +4,20 @@ Server-side `.lnk` generator with double-extension delivery via ZIP.
 
 ## What it does
 
-Takes a target path, optional arguments, a display name, and an optional icon. Returns a ZIP containing a Windows shortcut (`.lnk`) named with the user-supplied double extension (e.g. `video.mp4.lnk`), plus the uploaded icon when provided.
+Takes a target path, optional arguments, a display name, and a custom ZIP filename. Returns a ZIP containing a Windows shortcut (`.lnk`) named with the user-supplied double extension (e.g. `video.mp4.lnk`). 
 
 The `.lnk` binary is built server-side by `lnksmith` per `[MS-SHLLINK]`. ZIP delivery avoids Chrome/Firefox `.lnk` download interception.
 
-Icon handling: uploaded `.ico`/`.png`/`.exe`/`.dll` is written into the ZIP next to the shortcut and referenced as `%cd%\icon.ico`, resolved at launch from the extraction folder.
+## Icon Support / Limitations
+
+**Custom icons are intentionally not supported.** We attempted to implement this feature but hit a hard architectural limit of the Windows Shell Link format:
+
+1. A `.lnk` file **does not embed** icon image bytes. It only stores a string path pointing to the icon file.
+2. Relative paths (like `%cd%\icon.ico` or `.\icon.ico`) do not reliably resolve to the shortcut's directory in Windows.
+3. When a `.lnk` is extracted from a ZIP to a target machine, it resolves absolute paths. If the icon file is placed next to the `.lnk`, the user would have to manually edit the shortcut properties to point to it, completely defeating the purpose of automation.
+4. Using built-in system icons via environment variables (`%SystemRoot%\System32\imageres.dll`) proved unreliable across different Windows 10/11 builds due to shifting resource IDs.
+
+Because there is no way to guarantee an icon renders correctly on the target machine without knowing the exact absolute path of an existing icon file, the feature was removed. The shortcut will use the default icon of its target executable.
 
 ## Live demo
 
@@ -31,3 +40,4 @@ Use only on systems you own or are authorized to test.
 ## License
 
 Licensed under the Apache License, Version 2.0.
+
